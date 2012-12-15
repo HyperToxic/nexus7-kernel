@@ -417,7 +417,7 @@ static void option_instat_callback(struct urb *urb);
 
 /* ONDA MT825UP - MW875UP HSDPA 14.2 modem */
 #define ONDA_MT825UP         0x000b
-#define ONDA_MW875UP         0x0053
+#define ONDA_MW875UP         0x0054
 
 /* Samsung products */
 #define SAMSUNG_VENDOR_ID                       0x04e8
