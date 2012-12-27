@@ -125,7 +125,7 @@ EXPORT_SYMBOL(cad_pid);
 
 void (*pm_power_off_prepare)(void);
 
- extern void disable_auto_hotplug(void);
+ //extern void disable_auto_hotplug(void);
 /*
  * Returns true if current's euid is same as p's uid or euid,
  * or has CAP_SYS_NICE to p's user_ns.
@@ -367,7 +367,7 @@ EXPORT_SYMBOL(unregister_reboot_notifier);
  */
 void kernel_restart(char *cmd)
 {
-	disable_auto_hotplug();
+	//disable_auto_hotplug();
 	kernel_restart_prepare(cmd);
 	if (!cmd)
 		printk(KERN_EMERG "Restarting system.\n");
@@ -408,17 +408,9 @@ EXPORT_SYMBOL_GPL(kernel_halt);
  *	Shutdown everything and perform a clean system power_off.
  */
 
-extern unsigned battery_cable_status;
 void kernel_power_off(void)
 {
-	 if ((battery_cable_status)||(!gpio_get_value(TEGRA_GPIO_PV1))) {
-		char cmd[] = "chrager-mode";
-
-		printk(KERN_EMERG "kernel_power_off: go to charger mode!");
-		kernel_restart(cmd);
-	 }
-
-	disable_auto_hotplug();
+	//disable_auto_hotplug();
 	kernel_shutdown_prepare(SYSTEM_POWER_OFF);
 	if (pm_power_off_prepare)
 		pm_power_off_prepare();
