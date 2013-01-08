@@ -138,7 +138,7 @@ void tegra_assert_system_reset(char mode, const char *cmd)
 	}
 	writel_relaxed(reg, reset + PMC_SCRATCH0);
 
-	if (cmd && !strcmp(cmd, "chrager-mode"))
+	if (cmd && !strcmp(cmd, "charger-mode"))
 	{
 		reg = readl_relaxed(reset + PMC_SCRATCH37);
 		reg = GO_TO_CHARGER_MODE;
