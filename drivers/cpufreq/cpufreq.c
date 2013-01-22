@@ -69,7 +69,7 @@ static DEFINE_PER_CPU(int, cpufreq_policy_cpu);
 static DEFINE_PER_CPU(struct rw_semaphore, cpu_policy_rwsem);
 
 #define lock_policy_rwsem(mode, cpu)					\
-static int lock_policy_rwsem_##mode					\
+int lock_policy_rwsem_##mode					\
 (int cpu)								\
 {									\
 	int policy_cpu = per_cpu(cpufreq_policy_cpu, cpu);		\
@@ -94,7 +94,7 @@ static void unlock_policy_rwsem_read(int cpu)
 	up_read(&per_cpu(cpu_policy_rwsem, policy_cpu));
 }
 
-static void unlock_policy_rwsem_write(int cpu)
+void unlock_policy_rwsem_write(int cpu)
 {
 	int policy_cpu = per_cpu(cpufreq_policy_cpu, cpu);
 	BUG_ON(policy_cpu == -1);
@@ -556,6 +556,264 @@ static ssize_t show_scaling_setspeed(struct cpufreq_policy *policy, char *buf)
 	return policy->governor->show_setspeed(policy, buf);
 }
 
+/**
+ * show_scaling_driver - show the current cpufreq HW/BIOS limitation
+ */
+static ssize_t show_bios_limit(struct cpufreq_policy *policy, char *buf)
+{
+	unsigned int limit;
+	int ret;
+	if (cpufreq_driver->bios_limit) {
+		ret = cpufreq_driver->bios_limit(policy->cpu, &limit);
+		if (!ret)
+			return sprintf(buf, "%u\n", limit);
+	}
+	return sprintf(buf, "%u\n", policy->cpuinfo.max_freq);
+}
+
+#ifdef CONFIG_VOLTAGE_CONTROL
+/* 
+ * Tegra3 voltage control via cpufreq by Paul Reioux (faux123)
+ * inspired by Michael Huang's voltage control code for OMAP44xx
+ */
+
+#include "../../arch/arm/mach-tegra/dvfs.h"
+#include "../../arch/arm/mach-tegra/clock.h"
+
+extern int user_mv_table[MAX_DVFS_FREQS];
+extern int avp_millivolts[MAX_DVFS_FREQS];
+extern int lp_cpu_millivolts[MAX_DVFS_FREQS];
+extern int emc_millivolts[MAX_DVFS_FREQS];
+
+static ssize_t show_UV_mV_table(struct cpufreq_policy *policy, char *buf)
+{
+	int i = 0;
+	char *out = buf;
+       	struct clk *cpu_clk_g = tegra_get_clock_by_name("cpu_g");
+       
+        /* find how many actual entries there are */
+	i = cpu_clk_g->dvfs->num_freqs;
+       
+        for(i--; i >=0; i--) {
+          out += sprintf(out, "%lumhz: %i mV\n", cpu_clk_g->dvfs->freqs[i]/1000000, cpu_clk_g->dvfs->millivolts[i]);
+                     	
+	}
+
+	return out - buf;
+}
+
+static ssize_t store_UV_mV_table(struct cpufreq_policy *policy, char *buf, size_t count)
+{
+	int i = 0;
+	unsigned long volt_cur;
+        int ret;
+	char size_cur[16];
+
+	struct clk *cpu_clk_g = tegra_get_clock_by_name("cpu_g");
+
+	/* find how many actual entries there are */
+	i = cpu_clk_g->dvfs->num_freqs;
+
+          
+	for(i--; i >= 0; i--) {
+
+		if(cpu_clk_g->dvfs->freqs[i]/1000000 != 0) {
+			ret = sscanf(buf, "%lu", &volt_cur);
+			if (ret != 1)
+				return -EINVAL;
+			pr_info("[dmore] %s - eseguito MESSAGGIO di DEBUG.", __func__);
+			/* added a range limiter so we can allow overvolting too */
+			/* overvolting not possible in original faux code */
+			/* will get limits from rails later */
+			volt_cur = max(min(volt_cur,1250),600);
+
+			user_mv_table[i] = volt_cur;
+			pr_info("cpu g mv tbl[%i]: %lu\n", i, volt_cur);
+
+			/* Non-standard sysfs interface: advance buf */
+			ret = sscanf(buf, "%s", size_cur);
+			if (ret != 1)
+				return -EINVAL;
+			buf += (strlen(size_cur)+1);
+		}
+	}
+	/* update dvfs table here */
+	cpu_clk_g->dvfs->millivolts = user_mv_table;
+
+	return count;
+}
+
+static ssize_t show_lp_UV_mV_table(struct cpufreq_policy *policy, char *buf)
+{
+	int i = 0;
+	char *out = buf;
+	struct clk *cpu_clk_lp = tegra_get_clock_by_name("cpu_lp");
+
+	/* find how many actual entries there are */
+	i = cpu_clk_lp->dvfs->num_freqs;
+
+	for(i--; i >=0; i--) {
+		out += sprintf(out, "%lumhz: %i mV\n",
+				cpu_clk_lp->dvfs->freqs[i]/1000000,
+				cpu_clk_lp->dvfs->millivolts[i]);
+	}
+
+	return out - buf;
+}
+
+static ssize_t store_lp_UV_mV_table(struct cpufreq_policy *policy, const char *buf, size_t count)
+{
+	int i = 0;
+	unsigned long volt_cur;
+	int ret;
+	char size_cur[16];
+
+	struct clk *cpu_clk_lp = tegra_get_clock_by_name("cpu_lp");
+
+	/* find how many actual entries there are */
+	i = cpu_clk_lp->dvfs->num_freqs;
+
+	for(i--; i >= 0; i--) {
+
+		if(cpu_clk_lp->dvfs->freqs[i]/1000000 != 0) {
+			ret = sscanf(buf, "%lu", &volt_cur);
+			if (ret != 1)
+				return -EINVAL;
+
+			/* TODO: need some robustness checks */
+                        
+                        /* added a range limiter so we can allow overvolting too */
+			/* overvolting not possible in original faux code */
+			/* will get limits from rails later */
+			volt_cur = max(min(volt_cur,1250),600);
+
+			lp_cpu_millivolts[i] = volt_cur;
+			pr_info("cpu lp mv tbl[%i]: %lu\n", i, volt_cur);
+
+			/* Non-standard sysfs interface: advance buf */
+			ret = sscanf(buf, "%s", size_cur);
+			buf += (strlen(size_cur)+1);
+		}
+	}
+
+	return count;
+}
+
+static ssize_t show_emc_UV_mV_table(struct cpufreq_policy *policy, char *buf)
+{
+	int i = 0;
+	char *out = buf;
+	struct clk *clk_emc = tegra_get_clock_by_name("emc");
+
+	/* find how many actual entries there are */
+	i = clk_emc->dvfs->num_freqs;
+
+	for(i--; i >=0; i--) {
+		out += sprintf(out, "%lumhz: %i mV\n",
+				clk_emc->dvfs->freqs[i]/1000000,
+				clk_emc->dvfs->millivolts[i]);
+	}
+
+	return out - buf;
+}
+
+static ssize_t store_emc_UV_mV_table(struct cpufreq_policy *policy, const char *buf, size_t count)
+{
+	int i = 0;
+	unsigned long volt_cur;
+	int ret;
+	char size_cur[16];
+
+	struct clk *clk_emc = tegra_get_clock_by_name("emc");
+
+	/* find how many actual entries there are */
+	i = clk_emc->dvfs->num_freqs;
+
+	for(i--; i >= 0; i--) {
+
+		if(clk_emc->dvfs->freqs[i]/1000000 != 0) {
+			ret = sscanf(buf, "%lu", &volt_cur);
+			if (ret != 1)
+				return -EINVAL;
+
+			/* TODO: need some robustness checks */
+
+                        /* added a range limiter so we can allow overvolting too */
+			/* overvolting not possible in original faux code */
+			/* will get limits from rails later */
+			volt_cur = max(min(volt_cur,1250),600);
+
+			emc_millivolts[i] = volt_cur;
+			pr_info("emc mv tbl[%i]: %lu\n", i, volt_cur);
+
+			/* Non-standard sysfs interface: advance buf */
+			ret = sscanf(buf, "%s", size_cur);
+			buf += (strlen(size_cur)+1);
+		}
+	}
+
+	return count;
+}
+
+static ssize_t show_avp_UV_mV_table(struct cpufreq_policy *policy, char *buf)
+{
+	int i = 0;
+	char *out = buf;
+	struct clk *avp_clk = tegra_get_clock_by_name("3d");
+
+	/* find how many actual entries there are */
+	i = avp_clk->dvfs->num_freqs;
+
+	for(i--; i >=0; i--) {
+		out += sprintf(out, "%lumhz: %i mV\n",
+				avp_clk->dvfs->freqs[i]/1000000,
+				avp_clk->dvfs->millivolts[i]);
+	}
+
+	return out - buf;
+}
+
+static ssize_t store_avp_UV_mV_table(struct cpufreq_policy *policy, const char *buf, size_t count)
+{
+	int i = 0;
+	unsigned long volt_cur;
+	int ret;
+	char size_cur[16];
+
+	struct clk *avp_clk = tegra_get_clock_by_name("3d");
+
+	/* find how many actual entries there are */
+	i = avp_clk->dvfs->num_freqs;
+
+	for(i--; i >= 0; i--) {
+
+		if(avp_clk->dvfs->freqs[i]/1000000 != 0) {
+			ret = sscanf(buf, "%lu", &volt_cur);
+			if (ret != 1)
+				return -EINVAL;
+
+			/* TODO: need some robustness checks */
+
+                        /* added a range limiter so we can allow overvolting too */
+			/* overvolting not possible in original faux code */
+			/* will get limits from rails later */
+			volt_cur = max(min(volt_cur,1250),600);
+
+			avp_millivolts[i] = volt_cur;
+			pr_info("avp mv tbl[%i]: %lu\n", i, volt_cur);
+
+			/* Non-standard sysfs interface: advance buf */
+			ret = sscanf(buf, "%s", size_cur);
+			buf += (strlen(size_cur)+1);
+		}
+	}
+
+	return count;
+}
+
+/* End  Tegra3 voltage control */
+#endif
+
 static ssize_t store_dvfs_test(struct cpufreq_policy *policy,
 					const char *buf, size_t count)
 {
@@ -581,20 +839,7 @@ static ssize_t show_dvfs_test(struct cpufreq_policy *policy, char *buf)
 
 	return policy->governor->show_dvfs_test(policy, buf);
 }
-/**
- * show_scaling_driver - show the current cpufreq HW/BIOS limitation
- */
-static ssize_t show_bios_limit(struct cpufreq_policy *policy, char *buf)
-{
-	unsigned int limit;
-	int ret;
-	if (cpufreq_driver->bios_limit) {
-		ret = cpufreq_driver->bios_limit(policy->cpu, &limit);
-		if (!ret)
-			return sprintf(buf, "%u\n", limit);
-	}
-	return sprintf(buf, "%u\n", policy->cpuinfo.max_freq);
-}
+
 
 cpufreq_freq_attr_ro_perm(cpuinfo_cur_freq, 0400);
 cpufreq_freq_attr_ro(cpuinfo_min_freq);
@@ -613,6 +858,13 @@ cpufreq_freq_attr_rw(scaling_setspeed);
 cpufreq_freq_attr_rw(dvfs_test);
 cpufreq_freq_attr_ro(policy_min_freq);
 cpufreq_freq_attr_ro(policy_max_freq);
+#ifdef CONFIG_VOLTAGE_CONTROL
+/* Config Voltage Control */
+cpufreq_freq_attr_rw(UV_mV_table);
+//cpufreq_freq_attr_rw(lp_UV_mV_table);
+//cpufreq_freq_attr_rw(emc_UV_mV_table);
+//cpufreq_freq_attr_rw(avp_UV_mV_table);
+#endif
 
 static struct attribute *default_attrs[] = {
 	&cpuinfo_min_freq.attr,
@@ -629,6 +881,12 @@ static struct attribute *default_attrs[] = {
 	&dvfs_test.attr,
 	&policy_min_freq.attr,
 	&policy_max_freq.attr,
+#ifdef CONFIG_VOLTAGE_CONTROL
+        &UV_mV_table.attr,
+//	&lp_UV_mV_table.attr,
+//	&emc_UV_mV_table.attr,
+//	&avp_UV_mV_table.attr,
+#endif
 	NULL
 };
 
@@ -1476,10 +1734,10 @@ int __cpufreq_driver_target(struct cpufreq_policy *policy,
 
 	pr_debug("target for CPU %u: %u kHz, relation %u\n", policy->cpu,
 		target_freq, relation);
-	trace_cpu_scale(policy->cpu, policy->cur, POWER_CPU_SCALE_START);
+	// trace_cpu_scale(policy->cpu, policy->cur, POWER_CPU_SCALE_START);
 	if (cpu_online(policy->cpu) && cpufreq_driver->target)
 		retval = cpufreq_driver->target(policy, target_freq, relation);
-	trace_cpu_scale(policy->cpu, target_freq, POWER_CPU_SCALE_DONE);
+	// trace_cpu_scale(policy->cpu, target_freq, POWER_CPU_SCALE_DONE);
 
 	return retval;
 }
@@ -1662,14 +1920,12 @@ static int __cpufreq_set_policy(struct cpufreq_policy *data,
 				struct cpufreq_policy *policy)
 {
 	int ret = 0;
-	unsigned int qmin, qmax;
 	unsigned int pmin = policy->min;
 	unsigned int pmax = policy->max;
-
-	qmin = min((unsigned int)pm_qos_request(PM_QOS_CPU_FREQ_MIN),
-		   data->max);
-	qmax = max((unsigned int)pm_qos_request(PM_QOS_CPU_FREQ_MAX),
-		   data->min);
+	unsigned int qmin = min((int)pm_qos_request(PM_QOS_CPU_FREQ_MIN),
+				(int)data->user_policy.max);
+	unsigned int qmax = max((int)pm_qos_request(PM_QOS_CPU_FREQ_MAX),
+				 (int)data->user_policy.min);
 
 	pr_debug("setting new policy for CPU %u: %u - %u (%u - %u) kHz\n",
 		policy->cpu, pmin, pmax, qmin, qmax);
@@ -1681,7 +1937,8 @@ static int __cpufreq_set_policy(struct cpufreq_policy *data,
 	memcpy(&policy->cpuinfo, &data->cpuinfo,
 				sizeof(struct cpufreq_cpuinfo));
 
-	if (policy->min > data->max || policy->max < data->min) {
+	if (policy->min > data->user_policy.max ||
+	    policy->max < data->user_policy.min) {
 		ret = -EINVAL;
 		goto error_out;
 	}
