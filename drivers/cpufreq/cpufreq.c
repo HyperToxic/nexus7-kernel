@@ -31,7 +31,13 @@
 #include <linux/syscore_ops.h>
 #include <linux/pm_qos_params.h>
 
+#include "../../arch/arm/mach-tegra/dvfs.h"
+#include "../../arch/arm/mach-tegra/clock.h"
+
 #include <trace/events/power.h>
+
+static DEFINE_MUTEX(dvfs_lock);
+static DEFINE_MUTEX(cpu_lp_lock);
 
 /**
  * The "cpufreq driver" - the arch- or hardware-dependent low
@@ -87,7 +93,7 @@ lock_policy_rwsem(read, cpu);
 
 lock_policy_rwsem(write, cpu);
 
-static void unlock_policy_rwsem_read(int cpu)
+void unlock_policy_rwsem_read(int cpu)
 {
 	int policy_cpu = per_cpu(cpufreq_policy_cpu, cpu);
 	BUG_ON(policy_cpu == -1);
@@ -205,8 +211,7 @@ static void adjust_jiffies(unsigned long val, struct cpufreq_freqs *ci)
 		pr_debug("saving %lu as reference value for loops_per_jiffy; "
 			"freq is %u kHz\n", l_p_j_ref, l_p_j_ref_freq);
 	}
-	if ((val == CPUFREQ_PRECHANGE  && ci->old < ci->new) ||
-	    (val == CPUFREQ_POSTCHANGE && ci->old > ci->new) ||
+	if ((val == CPUFREQ_POSTCHANGE  && ci->old != ci->new) ||
 	    (val == CPUFREQ_RESUMECHANGE || val == CPUFREQ_SUSPENDCHANGE)) {
 		loops_per_jiffy = cpufreq_scale(l_p_j_ref, l_p_j_ref_freq,
 								ci->new);
@@ -556,6 +561,31 @@ static ssize_t show_scaling_setspeed(struct cpufreq_policy *policy, char *buf)
 	return policy->governor->show_setspeed(policy, buf);
 }
 
+static ssize_t store_dvfs_test(struct cpufreq_policy *policy,
+					const char *buf, size_t count)
+{
+	unsigned int enable= 0;
+	unsigned int ret;
+
+	if (!policy->governor || !policy->governor->start_dvfs_test)
+		return -EINVAL;
+
+	ret = sscanf(buf, "%u", &enable);
+	if (ret != 1)
+		return -EINVAL;
+
+	policy->governor->start_dvfs_test(policy, enable);
+
+	return count;
+}
+
+static ssize_t show_dvfs_test(struct cpufreq_policy *policy, char *buf)
+{
+	if (!policy->governor || !policy->governor->show_dvfs_test)
+		return sprintf(buf, "<unsupported>\n");
+
+	return policy->governor->show_dvfs_test(policy, buf);
+}
 /**
  * show_scaling_driver - show the current cpufreq HW/BIOS limitation
  */
@@ -572,7 +602,7 @@ static ssize_t show_bios_limit(struct cpufreq_policy *policy, char *buf)
 }
 
 #ifdef CONFIG_VOLTAGE_CONTROL
-/* 
+/*
  * Tegra3 voltage control via cpufreq by Paul Reioux (faux123)
  * inspired by Michael Huang's voltage control code for OMAP44xx
  */
@@ -589,14 +619,15 @@ static ssize_t show_UV_mV_table(struct cpufreq_policy *policy, char *buf)
 {
 	int i = 0;
 	char *out = buf;
-       	struct clk *cpu_clk_g = tegra_get_clock_by_name("cpu_g");
-       
-        /* find how many actual entries there are */
-	i = cpu_clk_g->dvfs->num_freqs;
-       
-        for(i--; i >=0; i--) {
-          out += sprintf(out, "%lumhz: %i mV\n", cpu_clk_g->dvfs->freqs[i]/1000000, cpu_clk_g->dvfs->millivolts[i]);
-                     	
+	struct clk *cpu_clk_g = tegra_get_clock_by_name("cpu_g");
+
+	/* find how many actual entries there are */
+		i = cpu_clk_g->dvfs->num_freqs;
+
+	for(i--; i >=0; i--) {
+		out += sprintf(out, "%lumhz: %i mV\n",
+				cpu_clk_g->dvfs->freqs[i]/1000000,
+				cpu_clk_g->dvfs->millivolts[i]);
 	}
 
 	return out - buf;
@@ -606,7 +637,7 @@ static ssize_t store_UV_mV_table(struct cpufreq_policy *policy, char *buf, size_
 {
 	int i = 0;
 	unsigned long volt_cur;
-        int ret;
+	int ret;
 	char size_cur[16];
 
 	struct clk *cpu_clk_g = tegra_get_clock_by_name("cpu_g");
@@ -614,26 +645,19 @@ static ssize_t store_UV_mV_table(struct cpufreq_policy *policy, char *buf, size_
 	/* find how many actual entries there are */
 	i = cpu_clk_g->dvfs->num_freqs;
 
-          
 	for(i--; i >= 0; i--) {
 
 		if(cpu_clk_g->dvfs->freqs[i]/1000000 != 0) {
 			ret = sscanf(buf, "%lu", &volt_cur);
 			if (ret != 1)
 				return -EINVAL;
-			pr_info("[dmore] %s - eseguito MESSAGGIO di DEBUG.", __func__);
-			/* added a range limiter so we can allow overvolting too */
-			/* overvolting not possible in original faux code */
-			/* will get limits from rails later */
-			volt_cur = max(min(volt_cur,1250),600);
 
+			/* TODO: need some robustness checks */
 			user_mv_table[i] = volt_cur;
-			pr_info("cpu g mv tbl[%i]: %lu\n", i, volt_cur);
+			pr_info("cpu g user mv tbl[%i]: %lu\n", i, volt_cur);
 
 			/* Non-standard sysfs interface: advance buf */
 			ret = sscanf(buf, "%s", size_cur);
-			if (ret != 1)
-				return -EINVAL;
 			buf += (strlen(size_cur)+1);
 		}
 	}
@@ -642,7 +666,6 @@ static ssize_t store_UV_mV_table(struct cpufreq_policy *policy, char *buf, size_
 
 	return count;
 }
-
 static ssize_t show_lp_UV_mV_table(struct cpufreq_policy *policy, char *buf)
 {
 	int i = 0;
@@ -681,12 +704,6 @@ static ssize_t store_lp_UV_mV_table(struct cpufreq_policy *policy, const char *b
 				return -EINVAL;
 
 			/* TODO: need some robustness checks */
-                        
-                        /* added a range limiter so we can allow overvolting too */
-			/* overvolting not possible in original faux code */
-			/* will get limits from rails later */
-			volt_cur = max(min(volt_cur,1250),600);
-
 			lp_cpu_millivolts[i] = volt_cur;
 			pr_info("cpu lp mv tbl[%i]: %lu\n", i, volt_cur);
 
@@ -737,12 +754,6 @@ static ssize_t store_emc_UV_mV_table(struct cpufreq_policy *policy, const char *
 				return -EINVAL;
 
 			/* TODO: need some robustness checks */
-
-                        /* added a range limiter so we can allow overvolting too */
-			/* overvolting not possible in original faux code */
-			/* will get limits from rails later */
-			volt_cur = max(min(volt_cur,1250),600);
-
 			emc_millivolts[i] = volt_cur;
 			pr_info("emc mv tbl[%i]: %lu\n", i, volt_cur);
 
@@ -793,12 +804,6 @@ static ssize_t store_avp_UV_mV_table(struct cpufreq_policy *policy, const char *
 				return -EINVAL;
 
 			/* TODO: need some robustness checks */
-
-                        /* added a range limiter so we can allow overvolting too */
-			/* overvolting not possible in original faux code */
-			/* will get limits from rails later */
-			volt_cur = max(min(volt_cur,1250),600);
-
 			avp_millivolts[i] = volt_cur;
 			pr_info("avp mv tbl[%i]: %lu\n", i, volt_cur);
 
@@ -810,37 +815,100 @@ static ssize_t store_avp_UV_mV_table(struct cpufreq_policy *policy, const char *
 
 	return count;
 }
-
-/* End  Tegra3 voltage control */
 #endif
 
-static ssize_t store_dvfs_test(struct cpufreq_policy *policy,
-					const char *buf, size_t count)
+static ssize_t show_gpu_oc(struct cpufreq_policy *policy, char *buf)
 {
-	unsigned int enable= 0;
-	unsigned int ret;
+	char *c = buf;
+	struct clk *gpu = tegra_get_clock_by_name("3d");
+	unsigned int i = gpu->dvfs->num_freqs;
+	unsigned long gpu_freq = 0;
 
-	if (!policy->governor || !policy->governor->start_dvfs_test)
+	if (i <= 0)
+		gpu_freq = -1;;
+
+	if (i >= 1)
+		gpu_freq = gpu->dvfs->freqs[gpu->dvfs->num_freqs-1]/1000000;
+
+	return sprintf(c, "%lu\n", gpu_freq);
+}
+
+static ssize_t store_gpu_oc(struct cpufreq_policy *policy, const char *buf, size_t count)
+{
+	int ret;
+	unsigned long gpu_freq = 0;
+	unsigned int i = 0;
+	unsigned long new_gpu_freq = 0;
+	unsigned int new_volt = 0;
+
+	//all the tables that need to be updated with the new frequencies
+	struct clk *vde = tegra_get_clock_by_name("vde");
+	struct clk *mpe = tegra_get_clock_by_name("mpe");
+	struct clk *two_d = tegra_get_clock_by_name("2d");
+	struct clk *epp = tegra_get_clock_by_name("epp");
+	struct clk *three_d = tegra_get_clock_by_name("3d");
+	struct clk *three_d2 = tegra_get_clock_by_name("3d2");
+	struct clk *se = tegra_get_clock_by_name("se");
+	struct clk *cbus = tegra_get_clock_by_name("cbus");
+	struct clk *host1x = tegra_get_clock_by_name("host1x");
+	struct clk *pll_c = tegra_get_clock_by_name("pll_c");
+        struct clk *sbus = tegra_get_clock_by_name("sbus");
+
+	unsigned int array_size = three_d->dvfs->num_freqs;
+
+        if (array_size <= 0)
+                return -EINVAL;
+
+	char cur_size[array_size];
+	i = array_size;
+
+	ret = sscanf(buf, "%lu", &gpu_freq);
+
+	if (ret == 0)
+			return -EINVAL;
+
+	new_gpu_freq = gpu_freq*1000000;
+
+	vde->max_rate = new_gpu_freq;
+	mpe->max_rate = new_gpu_freq;
+	two_d->max_rate = new_gpu_freq;
+	epp->max_rate = new_gpu_freq;
+	three_d->max_rate = new_gpu_freq;
+	three_d2->max_rate = new_gpu_freq;
+	se->max_rate = new_gpu_freq;
+	host1x->max_rate = ( new_gpu_freq / 2 );
+	cbus->max_rate = new_gpu_freq;
+	pll_c->max_rate = ( new_gpu_freq*2 );
+	pr_info("NEW PLL_C MAX_RATE: %lu\n", pll_c->max_rate);
+	sbus->max_rate = (new_gpu_freq/3);
+
+	for (i--; i >= 5; i--) {
+		mutex_lock(&dvfs_lock);
+
+		vde->dvfs->freqs[i] = new_gpu_freq;
+		mpe->dvfs->freqs[i] = new_gpu_freq;
+		two_d->dvfs->freqs[i] = new_gpu_freq;
+		epp->dvfs->freqs[i] = new_gpu_freq;
+		three_d->dvfs->freqs[i] = new_gpu_freq;
+		three_d2->dvfs->freqs[i] = new_gpu_freq;
+		se->dvfs->freqs[i] = new_gpu_freq;
+		host1x->dvfs->freqs[i] = ( new_gpu_freq / 2 );
+		cbus->dvfs->freqs[i] = new_gpu_freq;
+		pll_c->dvfs->freqs[i] = ( new_gpu_freq * 2 );
+		pr_info("NEW PLL_C FREQS: %lu\n", pll_c->dvfs->freqs[i]);
+		sbus->dvfs->freqs[i] = ( new_gpu_freq / 3 );
+		mutex_unlock(&dvfs_lock);
+	}
+
+	ret = sscanf(buf, "%s", cur_size);
+
+	if (ret == 0)
 		return -EINVAL;
 
-	ret = sscanf(buf, "%u", &enable);
-	if (ret != 1)
-		return -EINVAL;
-
-	policy->governor->start_dvfs_test(policy, enable);
+	buf += (strlen(cur_size) + 1);
 
 	return count;
 }
-
-static ssize_t show_dvfs_test(struct cpufreq_policy *policy, char *buf)
-{
-	if (!policy->governor || !policy->governor->show_dvfs_test)
-		return sprintf(buf, "<unsupported>\n");
-
-	return policy->governor->show_dvfs_test(policy, buf);
-}
-
-
 cpufreq_freq_attr_ro_perm(cpuinfo_cur_freq, 0400);
 cpufreq_freq_attr_ro(cpuinfo_min_freq);
 cpufreq_freq_attr_ro(cpuinfo_max_freq);
@@ -858,12 +926,12 @@ cpufreq_freq_attr_rw(scaling_setspeed);
 cpufreq_freq_attr_rw(dvfs_test);
 cpufreq_freq_attr_ro(policy_min_freq);
 cpufreq_freq_attr_ro(policy_max_freq);
+cpufreq_freq_attr_rw(gpu_oc);
 #ifdef CONFIG_VOLTAGE_CONTROL
-/* Config Voltage Control */
 cpufreq_freq_attr_rw(UV_mV_table);
-//cpufreq_freq_attr_rw(lp_UV_mV_table);
-//cpufreq_freq_attr_rw(emc_UV_mV_table);
-//cpufreq_freq_attr_rw(avp_UV_mV_table);
+cpufreq_freq_attr_rw(lp_UV_mV_table);
+cpufreq_freq_attr_rw(emc_UV_mV_table);
+cpufreq_freq_attr_rw(avp_UV_mV_table);
 #endif
 
 static struct attribute *default_attrs[] = {
@@ -880,13 +948,15 @@ static struct attribute *default_attrs[] = {
 	&scaling_setspeed.attr,
 	&dvfs_test.attr,
 	&policy_min_freq.attr,
+	&gpu_oc.attr,
 	&policy_max_freq.attr,
 #ifdef CONFIG_VOLTAGE_CONTROL
-        &UV_mV_table.attr,
-//	&lp_UV_mV_table.attr,
-//	&emc_UV_mV_table.attr,
-//	&avp_UV_mV_table.attr,
+	&UV_mV_table.attr,
+	&lp_UV_mV_table.attr,
+	&emc_UV_mV_table.attr,
+	&avp_UV_mV_table.attr,
 #endif
+
 	NULL
 };
 
@@ -1734,10 +1804,10 @@ int __cpufreq_driver_target(struct cpufreq_policy *policy,
 
 	pr_debug("target for CPU %u: %u kHz, relation %u\n", policy->cpu,
 		target_freq, relation);
-	// trace_cpu_scale(policy->cpu, policy->cur, POWER_CPU_SCALE_START);
+	trace_cpu_scale(policy->cpu, policy->cur, POWER_CPU_SCALE_START);
 	if (cpu_online(policy->cpu) && cpufreq_driver->target)
 		retval = cpufreq_driver->target(policy, target_freq, relation);
-	// trace_cpu_scale(policy->cpu, target_freq, POWER_CPU_SCALE_DONE);
+	trace_cpu_scale(policy->cpu, target_freq, POWER_CPU_SCALE_DONE);
 
 	return retval;
 }
@@ -1920,12 +1990,14 @@ static int __cpufreq_set_policy(struct cpufreq_policy *data,
 				struct cpufreq_policy *policy)
 {
 	int ret = 0;
+	unsigned int qmin, qmax;
 	unsigned int pmin = policy->min;
 	unsigned int pmax = policy->max;
-	unsigned int qmin = min((int)pm_qos_request(PM_QOS_CPU_FREQ_MIN),
-				(int)data->user_policy.max);
-	unsigned int qmax = max((int)pm_qos_request(PM_QOS_CPU_FREQ_MAX),
-				 (int)data->user_policy.min);
+
+	qmin = min((unsigned int)pm_qos_request(PM_QOS_CPU_FREQ_MIN),
+		   data->max);
+	qmax = max((unsigned int)pm_qos_request(PM_QOS_CPU_FREQ_MAX),
+		   data->min);
 
 	pr_debug("setting new policy for CPU %u: %u - %u (%u - %u) kHz\n",
 		policy->cpu, pmin, pmax, qmin, qmax);
@@ -1937,8 +2009,7 @@ static int __cpufreq_set_policy(struct cpufreq_policy *data,
 	memcpy(&policy->cpuinfo, &data->cpuinfo,
 				sizeof(struct cpufreq_cpuinfo));
 
-	if (policy->min > data->user_policy.max ||
-	    policy->max < data->user_policy.min) {
+	if (policy->min > data->max || policy->max < data->min) {
 		ret = -EINVAL;
 		goto error_out;
 	}
@@ -2068,70 +2139,6 @@ no_policy:
 	return ret;
 }
 EXPORT_SYMBOL(cpufreq_update_policy);
-
-/*
- *	cpufreq_set_gov - set governor for a cpu
- *	@cpu: CPU whose governor needs to be changed
- *	@target_gov: new governor to be set
- */
-int cpufreq_set_gov(char *target_gov, unsigned int cpu)
-{
-	int ret = 0;
-	struct cpufreq_policy new_policy;
-	struct cpufreq_policy *cur_policy;
-
-	if (target_gov == NULL)
-		return -EINVAL;
-
-	/* Get current governer */
-	cur_policy = cpufreq_cpu_get(cpu);
-	if (!cur_policy)
-		return -EINVAL;
-
-	if (lock_policy_rwsem_read(cur_policy->cpu) < 0) {
-		ret = -EINVAL;
-		goto err_out;
-	}
-
-	if (cur_policy->governor)
-		ret = strncmp(cur_policy->governor->name, target_gov,
-					strlen(target_gov));
-	else {
-		unlock_policy_rwsem_read(cur_policy->cpu);
-		ret = -EINVAL;
-		goto err_out;
-	}
-	unlock_policy_rwsem_read(cur_policy->cpu);
-
-	if (!ret) {
-		pr_debug(" Target governer & current governer is same\n");
-		ret = -EINVAL;
-		goto err_out;
-	} else {
-		new_policy = *cur_policy;
-		if (cpufreq_parse_governor(target_gov, &new_policy.policy,
-				&new_policy.governor)) {
-			ret = -EINVAL;
-			goto err_out;
-		}
-
-		if (lock_policy_rwsem_write(cur_policy->cpu) < 0) {
-			ret = -EINVAL;
-			goto err_out;
-		}
-
-		ret = __cpufreq_set_policy(cur_policy, &new_policy);
-
-		cur_policy->user_policy.policy = cur_policy->policy;
-		cur_policy->user_policy.governor = cur_policy->governor;
-
-		unlock_policy_rwsem_write(cur_policy->cpu);
-	}
-err_out:
-	cpufreq_cpu_put(cur_policy);
-	return ret;
-}
-EXPORT_SYMBOL(cpufreq_set_gov);
 
 static int __cpuinit cpufreq_cpu_callback(struct notifier_block *nfb,
 					unsigned long action, void *hcpu)
