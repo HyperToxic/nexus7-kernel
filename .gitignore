@@ -55,7 +55,7 @@ modules.builtin
 #
 !.gitignore
 !.mailmap
-!.config
+# !.config
 
 #
 # Generated include files
