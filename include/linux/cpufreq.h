@@ -203,6 +203,9 @@ extern int __cpufreq_driver_getavg(struct cpufreq_policy *policy,
 int cpufreq_register_governor(struct cpufreq_governor *governor);
 void cpufreq_unregister_governor(struct cpufreq_governor *governor);
 
+int lock_policy_rwsem_write(int cpu);
+void unlock_policy_rwsem_write(int cpu);
+
 
 /*********************************************************************
  *                      CPUFREQ DRIVER INTERFACE                     *
@@ -376,6 +379,9 @@ extern struct cpufreq_governor cpufreq_gov_smartass2;
 #elif defined(CONFIG_CPU_FREQ_DEFAULT_GOV_LAGFREE)
 extern struct cpufreq_governor cpufreq_gov_lagfree;
 #define CPUFREQ_DEFAULT_GOVERNOR	(&cpufreq_gov_lagfree)
+#elif defined(CONFIG_CPU_FREQ_DEFAULT_GOV_TOUCHDEMAND)
+extern struct cpufreq_governor cpufreq_gov_touchdemand;
+#define CPUFREQ_DEFAULT_GOVERNOR  (&cpufreq_gov_touchdemand)
 #endif
 
 
