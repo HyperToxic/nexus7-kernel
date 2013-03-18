@@ -379,6 +379,14 @@ config TEGRA_AUTO_HOTPLUG
 	  high/low power CPU clusters automatically, corresponding to
 	  CPU frequency scaling.
 
+config TEGRA_RUNNABLE_THREAD
+	bool "Tegra3 runnable thread hotplug"
+	depends on ARCH_TEGRA_3x_SOC
+	default n
+	help
+	  Tegra3 Runnable Thread calculations for CPU hotplug
+
+
 config TEGRA_MC_EARLY_ACK
 	bool "Enable early acknowledgement from mermory controller"
 	depends on ARCH_TEGRA_3x_SOC
