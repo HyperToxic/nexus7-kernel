@@ -66,7 +66,7 @@ module_param(idle_bottom_freq, uint, 0644);
 static int mp_overhead = 10;
 module_param(mp_overhead, int, 0644);
 
-static int balance_level = 70;
+static int balance_level = 75;
 module_param(balance_level, int, 0644);
 
 static struct clk *cpu_clk;
@@ -152,9 +152,9 @@ static int hp_state_set(const char *arg, const struct kernel_param *kp)
 	if (ret == 0) {
 		if ((hp_state == TEGRA_HP_DISABLED) &&
 				(old_state != TEGRA_HP_DISABLED)) {
-					mutex_unlock(tegra3_cpu_lock);
-					cancel_delayed_work_sync(&hotplug_work);
-					mutex_lock(tegra3_cpu_lock);
+				//	mutex_unlock(tegra3_cpu_lock);
+				//	cancel_delayed_work_sync(&hotplug_work);
+				//	mutex_lock(tegra3_cpu_lock);
 					pr_info("Tegra auto-hotplug disabled\n");
 		} else if (hp_state != TEGRA_HP_DISABLED) {
 			if (old_state == TEGRA_HP_DISABLED) {
