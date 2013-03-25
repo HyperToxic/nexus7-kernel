@@ -370,10 +370,19 @@ config TEGRA_CLUSTER_CONTROL
 	default y if PM_SLEEP
 
 
+config THALAMUS_HOTPLUG
+	bool "Enable Thalamus Arm CPU hot-plugging"
+	depends on HOTPLUG_CPU && CPU_FREQ &&!TEGRA_AUTO_HOTPLUG
+	default n
+	help
+	  This option enables turning CPUs off/on and switching tegra
+	  high/low power CPU clusters automatically, corresponding to
+	  CPU frequency scaling.
+
 config TEGRA_AUTO_HOTPLUG
 	bool "Enable automatic CPU hot-plugging"
 	depends on HOTPLUG_CPU && CPU_FREQ && !ARCH_CPU_PROBE_RELEASE && !ARCH_TEGRA_2x_SOC
-	default y
+	default n
 	help
 	  This option enables turning CPUs off/on and switching tegra
 	  high/low power CPU clusters automatically, corresponding to
@@ -381,7 +390,7 @@ config TEGRA_AUTO_HOTPLUG
 
 config TEGRA_RUNNABLE_THREAD
 	bool "Tegra3 runnable thread hotplug"
-	depends on ARCH_TEGRA_3x_SOC
+	depends on ARCH_TEGRA_3x_SOC && TEGRA_AUTO_HOTPLUG
 	default n
 	help
 	  Tegra3 Runnable Thread calculations for CPU hotplug
