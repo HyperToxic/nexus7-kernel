@@ -138,7 +138,7 @@ void tegra_assert_system_reset(char mode, const char *cmd)
 	}
 	writel_relaxed(reg, reset + PMC_SCRATCH0);
 
-	if (cmd && !strcmp(cmd, "charger-mode"))
+	if (cmd && !strcmp(cmd, "chrager-mode"))
 	{
 		reg = readl_relaxed(reset + PMC_SCRATCH37);
 		reg = GO_TO_CHARGER_MODE;
@@ -969,6 +969,7 @@ void __init tegra_ram_console_debug_reserve(unsigned long ram_console_size)
 
 	res->start = memblock_end_of_DRAM() - ram_console_size;
 	res->end = res->start + ram_console_size - 1;
+
 	// Register an extra 1M before ramconsole to store kexec stuff
 	real_start = res->start - SZ_1M;
 	real_size = ram_console_size + SZ_1M;
