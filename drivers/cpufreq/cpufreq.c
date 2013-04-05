@@ -791,7 +791,7 @@ static struct attribute *default_attrs[] = {
 	&UV_mV_table.attr,
 #endif
 #ifdef CONFIG_GPU_OVERCLOCK
-	&gpu_oc.attr,
+//	&gpu_oc.attr, /* disabled control interface */
 #endif
 
 	NULL
