@@ -48,6 +48,8 @@ static struct mutex *tegra3_cpu_lock;
 static struct workqueue_struct *hotplug_wq;
 static struct delayed_work hotplug_work;
 
+static bool is_plugging;
+
 static bool no_lp;
 module_param(no_lp, bool, 0644);
 
@@ -66,16 +68,19 @@ module_param(idle_bottom_freq, uint, 0644);
 static int mp_overhead = 10;
 module_param(mp_overhead, int, 0644);
 
-static int balance_level = 75;
+static int balance_level = 60;
 module_param(balance_level, int, 0644);
+
+static int up_time = 100;
+module_param(up_time, int, 0644);
+static int down_time = 200;
+module_param(down_time, int, 0644);
 
 static struct clk *cpu_clk;
 static struct clk *cpu_g_clk;
 static struct clk *cpu_lp_clk;
 
-#ifdef CONFIG_TEGRA_RUNNABLE_THREAD
 static unsigned long last_change_time;
-#endif
 
 static struct {
 	cputime64_t time_up_total;
@@ -151,11 +156,16 @@ static int hp_state_set(const char *arg, const struct kernel_param *kp)
 
 	if (ret == 0) {
 		if ((hp_state == TEGRA_HP_DISABLED) &&
-				(old_state != TEGRA_HP_DISABLED)) {
-				//	mutex_unlock(tegra3_cpu_lock);
-				//	cancel_delayed_work_sync(&hotplug_work);
-				//	mutex_lock(tegra3_cpu_lock);
-					pr_info("Tegra auto-hotplug disabled\n");
+		    (old_state != TEGRA_HP_DISABLED)) {
+			mutex_unlock(tegra3_cpu_lock);
+			cancel_delayed_work_sync(&hotplug_work);
+			mutex_lock(tegra3_cpu_lock);
+
+			if (is_plugging) {
+				pr_info("Tegra auto-hotplug: is_plugging is true, set to false\n");
+				is_plugging = false;
+			}
+			pr_info("Tegra auto-hotplug disabled\n");
 		} else if (hp_state != TEGRA_HP_DISABLED) {
 			if (old_state == TEGRA_HP_DISABLED) {
 				pr_info("Tegra auto-hotplug enabled\n");
@@ -190,15 +200,39 @@ enum {
 	TEGRA_CPU_SPEED_SKEWED,
 };
 
-#ifdef CONFIG_TEGRA_RUNNABLE_THREAD
 #define NR_FSHIFT	2
-static unsigned int nr_run_thresholds[] = {
+static unsigned int rt_profile_sel;
+
+/* avg run threads * 4 (e.g., 9 = 2.25 threads) */
+
+static unsigned int rt_profile_default[] = {
 /*      1,  2,  3,  4 - on-line cpus target */
-	5,  9, 13, UINT_MAX /* avg run threads * 4 (e.g., 9 = 2.25 threads) */
+	5,  9, 10, UINT_MAX
+};
+
+static unsigned int rt_profile_1[] = {
+/*      1,  2,  3,  4 - on-line cpus target */
+	8,  9, 10, UINT_MAX
+};
+
+static unsigned int rt_profile_2[] = {
+/*      1,  2,  3,  4 - on-line cpus target */
+	5,  13, 14, UINT_MAX
+};
+
+static unsigned int rt_profile_off[] = { /* disables runable thread */
+	0,  0,  0, UINT_MAX
+};
+
+static unsigned int *rt_profiles[] = {
+	rt_profile_default,
+	rt_profile_1,
+	rt_profile_2,
+	rt_profile_off
 };
 static unsigned int nr_run_hysteresis = 2;	/* 0.5 thread */
 static unsigned int nr_run_last;
-#endif
+
 
 static noinline int tegra_cpu_speed_balance(void)
 {
@@ -208,7 +242,6 @@ static noinline int tegra_cpu_speed_balance(void)
 	unsigned int nr_cpus = num_online_cpus();
 	unsigned int max_cpus = pm_qos_request(PM_QOS_MAX_ONLINE_CPUS) ? : 4;
 	unsigned int min_cpus = pm_qos_request(PM_QOS_MIN_ONLINE_CPUS);
-#ifdef CONFIG_TEGRA_RUNNABLE_THREAD
 	unsigned int avg_nr_run = avg_nr_running();
 	unsigned int nr_run;
 
@@ -221,29 +254,26 @@ static noinline int tegra_cpu_speed_balance(void)
 	 * TEGRA_CPU_SPEED_BIASED to keep CPU core composition unchanged
 	 * TEGRA_CPU_SPEED_SKEWED to remove CPU core off-line
 	 */
-	for (nr_run = 1; nr_run < ARRAY_SIZE(nr_run_thresholds); nr_run++) {
-		unsigned int nr_threshold = nr_run_thresholds[nr_run - 1];
+	unsigned int *current_profile = rt_profiles[rt_profile_sel];
+	for (nr_run = 1; nr_run < ARRAY_SIZE(rt_profile_default); nr_run++) {
+		unsigned int nr_threshold = current_profile[nr_run - 1];
 		if (nr_run_last <= nr_run)
 			nr_threshold += nr_run_hysteresis;
 		if (avg_nr_run <= (nr_threshold << (FSHIFT - NR_FSHIFT)))
 			break;
 	}
 	nr_run_last = nr_run;
-#endif
+
 
 	if (((tegra_count_slow_cpus(skewed_speed) >= 2) ||
-#ifdef CONFIG_TEGRA_RUNNABLE_THREAD
 	     (nr_run < nr_cpus) ||
-#endif
 	     tegra_cpu_edp_favor_down(nr_cpus, mp_overhead) ||
 	     (highest_speed <= idle_bottom_freq) || (nr_cpus > max_cpus)) &&
 	    (nr_cpus > min_cpus))
 		return TEGRA_CPU_SPEED_SKEWED;
 
 	if (((tegra_count_slow_cpus(balanced_speed) >= 1) ||
-#ifdef CONFIG_TEGRA_RUNNABLE_THREAD
 	     (nr_run <= nr_cpus) ||
-#endif
 	     (!tegra_cpu_edp_favor_up(nr_cpus, mp_overhead)) ||
 	     (highest_speed <= idle_bottom_freq) || (nr_cpus == max_cpus)) &&
 	    (nr_cpus >= min_cpus))
@@ -251,19 +281,12 @@ static noinline int tegra_cpu_speed_balance(void)
 
 	return TEGRA_CPU_SPEED_BALANCED;
 }
-void disable_auto_hotplug(void)
-{
-	hp_state=TEGRA_HP_DISABLED;
-	cancel_delayed_work(&hotplug_work);
-}
+
 static void tegra_auto_hotplug_work_func(struct work_struct *work)
 {
 	bool up = false;
 	unsigned int cpu = nr_cpu_ids;
 	unsigned long now = jiffies;
-#ifndef CONFIG_TEGRA_RUNNABLE_THREAD
-	static unsigned long last_change_time;
-#endif
 
 	mutex_lock(tegra3_cpu_lock);
 
@@ -276,13 +299,10 @@ static void tegra_auto_hotplug_work_func(struct work_struct *work)
 		if (cpu < nr_cpu_ids) {
 			up = false;
 		} else if (!is_lp_cluster() && !no_lp &&
-#ifdef CONFIG_TEGRA_RUNNABLE_THREAD
 			   !pm_qos_request(PM_QOS_MIN_ONLINE_CPUS) &&
 			   ((now - last_change_time) >= down_delay)) {
-#else
-			   !pm_qos_request(PM_QOS_MIN_ONLINE_CPUS)) {
-#endif
 			if(!clk_set_parent(cpu_clk, cpu_lp_clk)) {
+				pr_debug("CPU_DEBUG_HOTPLUG: enter LPCPU");
 				hp_stats_update(CONFIG_NR_CPUS, true);
 				hp_stats_update(0, false);
 				/* catch-up with governor target speed */
@@ -291,18 +311,13 @@ static void tegra_auto_hotplug_work_func(struct work_struct *work)
 			}
 		}
 		queue_delayed_work(
-#ifdef CONFIG_TEGRA_RUNNABLE_THREAD
 			hotplug_wq, &hotplug_work, up2gn_delay);
-#else
-			hotplug_wq, &hotplug_work, down_delay);
-#endif
 		break;
 	case TEGRA_HP_UP:
 		if (is_lp_cluster() && !no_lp) {
 			if(!clk_set_parent(cpu_clk, cpu_g_clk)) {
-#ifndef CONFIG_TEGRA_RUNNABLE_THREAD
+				pr_debug("CPU_DEBUG_HOTPLUG: leave LPCPU (%s)", __func__);
 				last_change_time = now;
-#endif
 				hp_stats_update(CONFIG_NR_CPUS, false);
 				hp_stats_update(0, true);
 				/* catch-up with governor target speed */
@@ -345,15 +360,17 @@ static void tegra_auto_hotplug_work_func(struct work_struct *work)
 	}
 	mutex_unlock(tegra3_cpu_lock);
 
-	if (cpu < nr_cpu_ids) {
-		if (up){
-			pr_debug("cpu_up(%u)+\n",cpu);
+	if (system_state > SYSTEM_RUNNING) {
+		pr_debug("CPU_DEBUG_HOTPLUG: system is not running\n");
+	} else if (cpu < nr_cpu_ids) {
+		if (up) {
 			cpu_up(cpu);
-			pr_debug("cpu_up(%u)-\n",cpu);
-		}else{
-			pr_debug("cpu_down(%u)+\n",cpu);
+			pr_debug("CPU_DEBUG_HOTPLUG: turn on CPU %d, online CPU 0-3=[%d%d%d%d]\n",
+					cpu, cpu_online(0), cpu_online(1), cpu_online(2), cpu_online(3));
+		} else {
 			cpu_down(cpu);
-			pr_debug("cpu_down(%u)-\n",cpu);
+			pr_debug("CPU_DEBUG_HOTPLUG: turn off CPU %d, online CPU 0-3=[%d%d%d%d]\n",
+					cpu, cpu_online(0), cpu_online(1), cpu_online(2), cpu_online(3));
 		}
 	}
 }
@@ -364,14 +381,13 @@ static int min_cpus_notify(struct notifier_block *nb, unsigned long n, void *p)
 
 	if ((n >= 1) && is_lp_cluster()) {
 		/* make sure cpu rate is within g-mode range before switching */
-		unsigned int speed = max(
-			tegra_getspeed(0), clk_get_min_rate(cpu_g_clk) / 1000);
+		unsigned int speed = max((unsigned long)tegra_getspeed(0), 
+			clk_get_min_rate(cpu_g_clk) / 1000);
 		tegra_update_cpu_speed(speed);
 
 		if (!clk_set_parent(cpu_clk, cpu_g_clk)) {
-#ifdef CONFIG_TEGRA_RUNNABLE_THREAD
+			pr_debug("CPU_DEBUG_HOTPLUG: leave LPCPU (%s)", __func__);
 			last_change_time = jiffies;
-#endif
 			hp_stats_update(CONFIG_NR_CPUS, false);
 			hp_stats_update(0, true);
 		}
@@ -402,6 +418,7 @@ void tegra_auto_hotplug_governor(unsigned int cpu_freq, bool suspend)
 		/* Switch to G-mode if suspend rate is high enough */
 		if (is_lp_cluster() && (cpu_freq >= idle_bottom_freq)) {
 			if (!clk_set_parent(cpu_clk, cpu_g_clk)) {
+				pr_debug("CPU_DEBUG_HOTPLUG: leave LPCPU (%s)", __func__);
 				hp_stats_update(CONFIG_NR_CPUS, false);
 				hp_stats_update(0, true);
 			}
@@ -437,11 +454,7 @@ void tegra_auto_hotplug_governor(unsigned int cpu_freq, bool suspend)
 		} else if (cpu_freq <= bottom_freq) {
 			hp_state = TEGRA_HP_DOWN;
 			queue_delayed_work(
-#ifdef CONFIG_TEGRA_RUNNABLE_THREAD
-				hotplug_wq, &hotplug_work, up2gn_delay);
-#else
-				hotplug_wq, &hotplug_work, down_delay);
-#endif
+				hotplug_wq, &hotplug_work, up_delay);
 		}
 		break;
 	case TEGRA_HP_DOWN:
@@ -457,11 +470,7 @@ void tegra_auto_hotplug_governor(unsigned int cpu_freq, bool suspend)
 		if (cpu_freq <= bottom_freq) {
 			hp_state = TEGRA_HP_DOWN;
 			queue_delayed_work(
-#ifdef CONFIG_TEGRA_RUNNABLE_THREAD
 				hotplug_wq, &hotplug_work, up_delay);
-#else
-				hotplug_wq, &hotplug_work, down_delay);
-#endif
 		} else if (cpu_freq <= top_freq) {
 			hp_state = TEGRA_HP_IDLE;
 		}
@@ -498,6 +507,8 @@ int tegra_auto_hotplug_init(struct mutex *cpu_lock)
 	up2gn_delay = msecs_to_jiffies(UP2Gn_DELAY_MS);
 	down_delay = msecs_to_jiffies(DOWN_DELAY_MS);
 
+	is_plugging = false;
+	
 	tegra3_cpu_lock = cpu_lock;
 	hp_state = INITIAL_STATE;
 	hp_init_stats();
@@ -569,6 +580,25 @@ static const struct file_operations hp_stats_fops = {
 	.release	= single_release,
 };
 
+static int rt_bias_get(void *data, u64 *val)
+{
+	*val = rt_profile_sel;
+	return 0;
+}
+static int rt_bias_set(void *data, u64 val)
+{
+	if (val < ARRAY_SIZE(rt_profiles))
+		rt_profile_sel = (u32)val;
+
+	pr_debug("rt_profile_sel set to %d\nthresholds are now [%d, %d, %d]\n",
+		rt_profile_sel,
+		rt_profiles[rt_profile_sel][0],
+		rt_profiles[rt_profile_sel][1],
+		rt_profiles[rt_profile_sel][2]);
+	return 0;
+}
+DEFINE_SIMPLE_ATTRIBUTE(rt_bias_fops, rt_bias_get, rt_bias_set, "%llu\n");
+
 static int min_cpus_get(void *data, u64 *val)
 {
 	*val = pm_qos_request(PM_QOS_MIN_ONLINE_CPUS);
@@ -592,6 +622,63 @@ static int max_cpus_set(void *data, u64 val)
 	return 0;
 }
 DEFINE_SIMPLE_ATTRIBUTE(max_cpus_fops, max_cpus_get, max_cpus_set, "%llu\n");
+
+/*
+static int bthp_ctrl_set (
+   const char *arg,
+   const struct kernel_param *kp
+   )
+{
+	int ret = 0;
+
+	ret = param_set_int (arg, kp);
+	if (!ret) {
+        pr_bthp_info ("bthp_en = %d\n", bthp_en);
+	}
+      
+	return ret;
+}
+
+static int bthp_ctrl_get (
+   char *buffer,
+   const struct kernel_param *kp
+   )
+{
+	return param_get_int (buffer, kp);
+}
+
+static struct kernel_param_ops bthp_ctrl_ops = {
+	.set = bthp_ctrl_set,
+	.get = bthp_ctrl_get,
+};
+	module_param_cb(bthp_en, &bthp_ctrl_ops, &bthp_en, 0444);
+*/
+
+/* controller for activity trigger */
+static bool at_en = 1;
+
+static int at_ctrl_set (
+   const char *arg,
+   const struct kernel_param *kp
+   )
+{
+	return param_set_int (arg, kp);
+}
+
+static int at_ctrl_get (
+   char *buffer,
+   const struct kernel_param *kp
+   )
+{
+	return param_get_int (buffer, kp);
+}
+
+static struct kernel_param_ops at_ctrl_ops = {
+	.set = at_ctrl_set,
+	.get = at_ctrl_get,
+};
+module_param_cb(at_en, &at_ctrl_ops, &at_en, 0664);
+
 
 static int __init tegra_auto_hotplug_debug_init(void)
 {
@@ -621,6 +708,9 @@ static int __init tegra_auto_hotplug_debug_init(void)
 
 	if (!debugfs_create_file(
 		"stats", S_IRUGO, hp_debugfs_root, NULL, &hp_stats_fops))
+		goto err_out;
+	if (!debugfs_create_file(
+		"core_bias", S_IRUGO, hp_debugfs_root, NULL, &rt_bias_fops))
 		goto err_out;
 
 	return 0;
