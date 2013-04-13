@@ -30,7 +30,7 @@
 
 #ifdef CONFIG_VOLTAGE_CONTROL
 int user_mv_table[MAX_DVFS_FREQS] = {
-	800, 825, 850, 875, 900, 912, 975, 1000, 1025, 1050, 1075, 1100, 1125, 1150, 1175, 1200, 1212, 1237};
+	775, 800, 850, 875, 900, 950, 975, 1000, 1025, 1050, 1075, 1100, 1125, 1150, 1175, 1200, 1212, 1237};
 #endif
 
 static bool tegra_dvfs_cpu_disabled;
@@ -38,10 +38,10 @@ static bool tegra_dvfs_core_disabled;
 static struct dvfs *cpu_dvfs;
 
 static int cpu_millivolts[MAX_DVFS_FREQS] = {
-	800, 825, 850, 875, 900, 912, 975, 1000, 1025, 1050, 1075, 1100, 1125, 1150, 1175, 1200, 1212, 1237};
+	775, 800, 850, 875, 900, 950, 975, 1000, 1025, 1050, 1075, 1100, 1125, 1150, 1175, 1200, 1212, 1237};
 
 static unsigned int cpu_cold_offs_mhz[MAX_DVFS_FREQS] = {
-	  50,  50,  50,  50,  50,  50,  50,  50,  50,   50,   50,   50,   50,   50,   25,   25,   25,   25};
+	50,  50,  50,  50,  50,  50,  50,  50,  50,   50,   50,   50,   50,   50,   25,   25,   25,   25};
 
 static int core_millivolts[MAX_DVFS_FREQS] = {
 	950, 1000, 1050, 1100, 1150, 1200, 1250, 1300, 1350};
@@ -59,7 +59,7 @@ static int cpu_below_core = VDD_CPU_BELOW_VDD_CORE;
 static struct dvfs_rail tegra3_dvfs_rail_vdd_cpu = {
 	.reg_id = "vdd_cpu",
 	.max_millivolts = 1250,
-	.min_millivolts = 800,
+	.min_millivolts = 750,
 	.step = VDD_SAFE_STEP,
 	.jmp_to_zero = true,
 };
@@ -84,9 +84,12 @@ static int tegra3_get_core_floor_mv(int cpu_mv)
 		return 1000;
 	if (cpu_mv < 1000)
 		return 1100;
-	if (cpu_mv < 1050)
-		return 1150;
-	if ((cpu_mv < 1100) || (tegra_cpu_speedo_id() == 4))
+	if ((tegra_cpu_speedo_id() < 2) ||
+	    (tegra_cpu_speedo_id() == 4) ||
+	    (tegra_cpu_speedo_id() == 7) ||
+	    (tegra_cpu_speedo_id() == 8))
+		return 1200;
+	if (cpu_mv < 1100)
 		return 1200;
 	if (cpu_mv <= 1250)
 		return 1300;
@@ -143,7 +146,8 @@ static struct dvfs_relationship tegra3_dvfs_relationships[] = {
 	}
 
 static struct dvfs cpu_dvfs_table[] = {
-	/* Cpu voltages (mV):	      800, 825, 850, 875, 900, 912, 975, 1000, 1025, 1050, 1075, 1100, 1125, 1150, 1175, 1200, 1212, 1237 */
+	
+/* Cpu voltages (mV):	              775, 800, 850, 875,  900,  950,  975, 1000, 1025, 1050, 1075, 1100, 1125, 1150, 1175, 1200, 1212, 1237 */
 	CPU_DVFS("cpu_g",  0, 0, MHZ,   1,   1, 684, 684,  817,  817, 1026, 1102, 1149, 1187, 1225, 1282, 1300),
 	CPU_DVFS("cpu_g",  0, 1, MHZ,   1,   1, 807, 807,  948,  948, 1117, 1171, 1206, 1300),
 	CPU_DVFS("cpu_g",  0, 2, MHZ,   1,   1, 883, 883, 1039, 1039, 1178, 1206, 1300),
@@ -164,8 +168,7 @@ static struct dvfs cpu_dvfs_table[] = {
 
 	CPU_DVFS("cpu_g",  4, 0, MHZ, 460, 460, 550, 550,  680,  680,  820,  970, 1040, 1080, 1150, 1200, 1240, 1280, 1320, 1360, 1360, 1500),
 	CPU_DVFS("cpu_g",  4, 1, MHZ, 480, 480, 650, 650,  780,  780,  990, 1040, 1100, 1200, 1250, 1300, 1330, 1360, 1400, 1500),
-	/* Nexus 7 - faking speedo id = 4, process id =2
-    Cpu voltages (mV):	      	  800, 825, 850, 875,  900,  912,  975, 1000, 1025, 1050, 1075, 1100, 1125, 1150, 1175, 1200, 1212, 1237 */
+	/* Nexus 7 - faking speedo id = 4, process id =2 */
 	CPU_DVFS("cpu_g",  4, 2, MHZ, 520, 540, 700, 720,  860,  880, 1050, 1150, 1200, 1240, 1300, 1340, 1380, 1400, 1470, 1500, 1540, 1600),
 	CPU_DVFS("cpu_g",  4, 3, MHZ, 550, 550, 770, 770,  910,  910, 1150, 1230, 1280, 1330, 1370, 1400, 1500),
 
@@ -196,9 +199,10 @@ static struct dvfs cpu_dvfs_table[] = {
 
 	CPU_DVFS("cpu_g", 13, 3, MHZ, 550, 550, 770, 770,  910,  910, 1150, 1230, 1280, 1330, 1370, 1400, 1470, 1500, 1500, 1540, 1540, 1700),
 	CPU_DVFS("cpu_g", 13, 4, MHZ, 550, 550, 770, 770,  940,  940, 1160, 1240, 1280, 1360, 1390, 1470, 1500, 1520, 1520, 1590, 1700),
+	CPU_DVFS("cpu_g", 14, -1, MHZ,  1,   1,   1,   1,    1,    1,  900,  900,  900,  900,  900,  900,  900,  900,  900,  900),
+	CPU_DVFS("cpu_g", 15, -1, MHZ,  1,   1,   1,   1,  900,  900,  900,  900,  900,  900,  900,  900,  900,  900,  900,  900),
 
-	/*
-	 * "Safe entry" to be used when no match for chip speedo, process
+	 /* "Safe entry" to be used when no match for chip speedo, process
 	 *  corner is found (just to boot at low rate); must be the last one
 	 */
 	CPU_DVFS("cpu_g", -1, -1, MHZ, 1,   1, 216, 216, 300),
@@ -226,12 +230,12 @@ static struct dvfs core_dvfs_table[] = {
 
 	CORE_DVFS("emc",    0, 1, KHZ,        1, 266500, 266500, 266500, 266500,  533000,  533000,  533000,  533000),
 	CORE_DVFS("emc",    1, 1, KHZ,   102000, 408000, 408000, 408000, 408000,  667000,  667000,  667000,  667000),
-	CORE_DVFS("emc",    2, 1, KHZ,   102000, 408000, 408000, 408000, 408000,  667000,  667000,  800000,  900000),
+	CORE_DVFS("emc",    2, 1, KHZ,   102000, 450000, 450000, 450000, 450000,  667000,  667000,  800000,  900000),
 	CORE_DVFS("emc",    3, 1, KHZ,        1,      1,      1,      1,      1,       1,  625000,  625000,  625000),
 
 	CORE_DVFS("sbus",   0, 1, KHZ,        1, 136000, 164000, 191000, 216000,  216000,  216000,  216000,  216000),
-	CORE_DVFS("sbus",   1, 1, KHZ,    51000, 205000, 205000, 227000, 227000,  267000,  267000,  267000,  267000),
-	CORE_DVFS("sbus",   2, 1, KHZ,    51000, 205000, 205000, 227000, 227000,  267000,  334000,  334000,  334000),
+	CORE_DVFS("sbus",   1, 1, KHZ,   102000, 205000, 205000, 227000, 227000,  267000,  267000,  267000,  267000),
+	CORE_DVFS("sbus",   2, 1, KHZ,   102000, 205000, 205000, 227000, 227000,  267000,  334000,  334000,  334000),
 	CORE_DVFS("sbus",   3, 1, KHZ,        1,      1,      1,      1,      1,       1,  378000,  378000,  378000),
 
 	CORE_DVFS("vi",     0, 1, KHZ,        1, 216000, 285000, 300000, 300000,  300000,  300000,  300000,  300000),
@@ -649,7 +653,11 @@ static int __init get_core_nominal_mv_index(int speedo_id)
 {
 	int i;
 	int mv = tegra_core_speedo_mv();
-	int core_edp_limit = get_core_edp();
+#if 0	/* fixme: hard code to let CPU voltage can be no limited */
+ 	int core_edp_limit = get_core_edp();
+#else
+	int core_edp_limit = 0;
+#endif	
 
 	/*
 	 * Start with nominal level for the chips with this speedo_id. Then,
